@@ -30,7 +30,8 @@ def init_db():
                 name TEXT UNIQUE,
                 session_path TEXT,
                 username TEXT,              -- @юзернейм аккаунта (выдаётся лиду)
-                status TEXT DEFAULT 'active',
+                status TEXT DEFAULT 'active',  -- active / paused
+                example TEXT,               -- собственный стиль/примеры для этого аккаунта
                 daily_replies INTEGER DEFAULT 0,
                 daily_date TEXT,
                 created_at INTEGER
@@ -70,13 +71,13 @@ def init_db():
                 telegram_id TEXT,            -- id чела в боте
                 username TEXT,
                 ai_username TEXT,            -- какой аккаунт ИИ выдан
-                status TEXT DEFAULT 'fresh', -- fresh / handed / qualified / rejected / ghost
-                score REAL DEFAULT 0,        -- жёсткий скоринг 0..1
-                confirmations INTEGER DEFAULT 0,
-                proof TEXT,
-                income TEXT,
-                pocket_id TEXT,
+                status TEXT DEFAULT 'fresh', -- fresh / handed / qualified / rejected
+                confirmations INTEGER DEFAULT 0,   -- сколько раз ИИ зафиксировал действие
+                pocket_id TEXT,              -- собирает ИИ в диалоге
+                income TEXT,                 -- сколько заработал (собирает ИИ)
+                action_done INTEGER DEFAULT 0,     -- сделал ли действие на PO
                 captcha_passed INTEGER DEFAULT 0,
+                credited INTEGER DEFAULT 0,        -- начислен ли лид партнёру
                 created_at INTEGER,
                 updated_at INTEGER
             );

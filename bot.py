@@ -24,7 +24,7 @@ logging.basicConfig(level=logging.INFO)
 
 bot = Bot(token=config.BOT_TOKEN)
 dp = Dispatcher()
-workers = Workers()
+workers = Workers(None)  # AIO-сессия подставится в on_startup
 AIO = None  # aiohttp-сессия для ИИ
 
 
@@ -34,7 +34,6 @@ class AdminStates(StatesGroup):
 
 
 class UserStates(StatesGroup):
-    waiting_proof = State()
     waiting_wallet = State()
 
 
@@ -55,6 +54,7 @@ def rub(leads):
 # ============================================================
 async def admin_menu(m, extra=""):
     k = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🎛 Аккаунты (сессии)", callback_data="a_sessions")],
         [InlineKeyboardButton(text="📊 Статистика", callback_data="a_stats")],
         [InlineKeyboardButton(text="🏆 Топ лидов по партнёрам", callback_data="a_top")],
         [InlineKeyboardButton(text="🔗 Все партнёрские ссылки", callback_data="a_links")],
@@ -66,11 +66,184 @@ async def admin_menu(m, extra=""):
     await m.answer(
         "🛠 <b>Админ-панель</b>\n\n"
         "• Кидай <b>.session</b> — подключу аккаунт для ИИ\n"
-        "• <b>/пример</b> — пример общения для ИИ\n"
+        "• <b>/пример</b> — общий пример общения для ИИ\n"
+        "• <b>/стиль &lt;имя_сессии&gt;</b> — свой стиль для конкретного аккаунта\n"
         "• <b>/канал ID</b> — добавить канал для капчи\n"
         f"{extra}",
         reply_markup=k, parse_mode="HTML",
     )
+
+
+# ============================================================
+# УПРАВЛЕНИЕ АККАУНТАМИ (СЕССИЯМИ)
+# ============================================================
+@dp.callback_query(F.data == "a_sessions")
+async def a_sessions(cq: CallbackQuery):
+    if not is_admin(cq.from_user.id):
+        await cq.answer("⛔ нет доступа", show_alert=True)
+        return
+    with db() as conn:
+        rows = conn.execute("SELECT * FROM sessions").fetchall()
+    text = "🎛 <b>Аккаунты (сессии)</b>\n\n"
+    kb = []
+    for r in rows:
+        online = "🟢" if r["name"] in workers.workers else "🔴"
+        replies = r["daily_replies"] if r["daily_date"] == datetime.date.today().isoformat() else 0
+        status = "✓ in сети" if online == "🟢" else ("⏸ пауза" if r["status"] == "paused" else "✓")
+        text += f"{online} {r['name']} · @{r['username'] or '?'} · {status} · ответов {replies}/день\n"
+        kb.append([InlineKeyboardButton(
+            text=f"▪ {r['name']}",
+            callback_data=f"session::{r['id']}",
+        )])
+    kb.append([InlineKeyboardButton(text="🔄 Обновить", callback_data="a_sessions")])
+    if not rows:
+        text += "Пока нет сессий. Кидай .session файл."
+    await cq.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb),
+                               parse_mode="HTML")
+    await cq.answer()
+
+
+@dp.callback_query(F.data.startswith("session::"))
+async def session_detail(cq: CallbackQuery):
+    if not is_admin(cq.from_user.id):
+        await cq.answer("⛔ нет доступа", show_alert=True)
+        return
+    sid = int(cq.data.split("::")[1])
+    with db() as conn:
+        r = conn.execute("SELECT * FROM sessions WHERE id=?", (sid,)).fetchone()
+        led = conn.execute("SELECT COUNT(*) c FROM leads WHERE ai_username=? AND credited=1",
+                           (r["username"],)).fetchone()["c"]
+        chats = conn.execute("SELECT COUNT(*) c FROM conversations WHERE ai_username=?",
+                             (r["username"],)).fetchone()["c"]
+    online = r["name"] in workers.workers
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="▶ Включить", callback_data=f"session_on::{sid}")],
+        [InlineKeyboardButton(text="⏸ Пауза", callback_data=f"session_pause::{sid}")],
+        [InlineKeyboardButton(text="🖊 Стиль аккаунта", callback_data=f"session_style::{sid}")],
+        [InlineKeyboardButton(text="💬 Чаты аккаунта", callback_data=f"session_chats::{sid}")],
+        [InlineKeyboardButton(text="🗑 Удалить", callback_data=f"session_del::{sid}")],
+        [InlineKeyboardButton(text="◀ Назад", callback_data="a_sessions")],
+    ])
+    await cq.message.edit_text(
+        f"🎛 <b>{r['name']}</b>\n"
+        f"@{r['username'] or '?'} · {'🟢 онлайн' if online else '🔴 офлайн'}\n"
+        f"Статус: {r['status']}\n"
+        f"📈 Лидов начислено с этого аккаунта: {led}\n"
+        f"💬 Чатов ведётся: {chats}\n"
+        f"🖊 Стиль: {'задан' if r['example'] else 'общий (глобальный пример)'}",
+        reply_markup=kb, parse_mode="HTML",
+    )
+    await cq.answer()
+
+
+@dp.callback_query(F.data.startswith("session_on::"))
+async def session_on(cq: CallbackQuery):
+    if not is_admin(cq.from_user.id):
+        await cq.answer("⛔ нет доступа", show_alert=True); return
+    sid = int(cq.data.split("::")[1])
+    with db() as conn:
+        row = conn.execute("SELECT name FROM sessions WHERE id=?", (sid,)).fetchone()
+        conn.execute("UPDATE sessions SET status='active' WHERE id=?", (sid,))
+    await workers.start_one(row["name"])
+    await cq.answer("✅ Аккаунт включён")
+    await session_detail(cq)
+
+
+@dp.callback_query(F.data.startswith("session_pause::"))
+async def session_pause(cq: CallbackQuery):
+    if not is_admin(cq.from_user.id):
+        await cq.answer("⛔ нет доступа", show_alert=True); return
+    sid = int(cq.data.split("::")[1])
+    with db() as conn:
+        row = conn.execute("SELECT name FROM sessions WHERE id=?", (sid,)).fetchone()
+        conn.execute("UPDATE sessions SET status='paused' WHERE id=?", (sid,))
+    await workers.stop_one(row["name"])
+    await cq.answer("⏸ Аккаунт на паузе")
+    await session_detail(cq)
+
+
+@dp.callback_query(F.data.startswith("session_del::"))
+async def session_del(cq: CallbackQuery):
+    if not is_admin(cq.from_user.id):
+        await cq.answer("⛔ нет доступа", show_alert=True); return
+    sid = int(cq.data.split("::")[1])
+    with db() as conn:
+        row = conn.execute("SELECT name FROM sessions WHERE id=?", (sid,)).fetchone()
+        conn.execute("DELETE FROM sessions WHERE id=?", (sid,))
+    await workers.stop_one(row["name"])
+    try:
+        import os
+        os.remove(f"{config.SESSION_DIR}/{row['name']}")
+    except Exception:
+        pass
+    await cq.answer("🗑 Аккаунт удалён")
+    await a_sessions(cq)
+
+
+@dp.callback_query(F.data.startswith("session_style::"))
+async def session_style(cq: CallbackQuery, state: FSMContext):
+    if not is_admin(cq.from_user.id):
+        await cq.answer("⛔ нет доступа", show_alert=True); return
+    sid = int(cq.data.split("::")[1])
+    with db() as conn:
+        row = conn.execute("SELECT name FROM sessions WHERE id=?", (sid,)).fetchone()
+    await state.update_data(session_id=sid)
+    await state.set_state(AdminStates.waiting_example)
+    await cq.message.answer(
+        f"✍️ <b>Свой стиль для {row['name']}</b>\n"
+        f"Отправь текст примера общения. Только этот аккаунт будет ему следовать.\n"
+        f"Для отмены: /отмена",
+        parse_mode="HTML",
+    )
+    await cq.answer()
+
+
+@dp.message(Command("стиль"))
+async def cmd_style(m: Message, state: FSMContext):
+    if not is_admin(m.from_user.id):
+        return
+    args = m.text.split(maxsplit=1)
+    if len(args) < 2:
+        await m.answer("Формат: /стиль <имя_сессии>\nНапример: /стиль myacc.session")
+        return
+    with db() as conn:
+        row = conn.execute("SELECT id FROM sessions WHERE name=?", (args[1],)).fetchone()
+    if not row:
+        await m.answer("❌ Сессия не найдена.")
+        return
+    await state.update_data(session_id=row["id"])
+    await state.set_state(AdminStates.waiting_example)
+    await m.answer(f"✍️ Отправь пример стиля для {args[1]}:")
+
+
+@dp.callback_query(F.data.startswith("session_chats::"))
+async def session_chats(cq: CallbackQuery):
+    if not is_admin(cq.from_user.id):
+        await cq.answer("⛔ нет доступа", show_alert=True); return
+    sid = int(cq.data.split("::")[1])
+    with db() as conn:
+        r = conn.execute("SELECT username FROM sessions WHERE id=?", (sid,)).fetchone()
+        rows = conn.execute(
+            "SELECT telegram_id FROM conversations WHERE ai_username=? ORDER BY updated_at DESC LIMIT 15",
+            (r["username"],),
+        ).fetchall()
+    kb = []
+    for row in rows:
+        kb.append([InlineKeyboardButton(
+            text=row["telegram_id"], callback_data=f"ev::{row['telegram_id']}"
+        )])
+    kb.append([InlineKeyboardButton(text="◀ Назад", callback_data=f"session::{sid}")])
+    await cq.message.edit_text(
+        f"💬 <b>Чаты аккаунта @{r['username']}</b>",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=kb), parse_mode="HTML",
+    )
+    await cq.answer()
+
+
+@dp.message(Command("отмена"))
+async def cmd_cancel(m: Message, state: FSMContext):
+    await state.clear()
+    await m.answer("Отменено.")
 
 
 @dp.message(Command("start"))
@@ -116,8 +289,7 @@ async def upload_session(m: Message):
         )
     await m.answer(f"✅ Сессия {doc.file_name} сохранена. Подключаю…")
     try:
-        await workers.account.stop() if workers.account else None
-        await workers.start_all()
+        await workers.start_one(doc.file_name)
         await m.answer("✅ Аккаунт подключён и теперь греет лидов.")
     except Exception as e:
         await m.answer(f"❌ Ошибка: {e}")
@@ -125,10 +297,18 @@ async def upload_session(m: Message):
 
 @dp.message(F.text, AdminStates.waiting_example)
 async def save_example(m: Message, state: FSMContext):
+    data = await state.get_data()
+    sid = data.get("session_id")
     with db() as conn:
-        conn.execute("INSERT INTO ai_examples (content) VALUES (?)", (m.text,))
+        if sid:
+            # стиль конкретного аккаунта
+            conn.execute("UPDATE sessions SET example=? WHERE id=?", (m.text, sid))
+            await m.answer("✅ Стиль этого аккаунта обновлён. ИИ на нём будет так общаться.")
+        else:
+            # глобальный пример
+            conn.execute("INSERT INTO ai_examples (content) VALUES (?)", (m.text,))
+            await m.answer("✅ Пример сохранён. ИИ будет подражать (если у аккаунта нет своего стиля).")
     await state.clear()
-    await m.answer("✅ Пример сохранён. ИИ будет подражать.")
 
 
 @dp.message(Command("пример"))
@@ -182,14 +362,13 @@ async def user_menu(m, extra=""):
     leads = row["leads"] if row else 0
     k = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🔗 Мои партнёрские ссылки", callback_data="u_links")],
-        [InlineKeyboardButton(text="✅ Отправить proof лида", callback_data="u_proof")],
         [InlineKeyboardButton(text="💰 Заказать вывод", callback_data="u_wd")],
         [InlineKeyboardButton(text="📈 Статистика", callback_data="u_stats")],
     ])
     await m.answer(
         f"👋 Привет, партнёр!\n\n💎 Лидов: <b>{leads}</b> (≈{rub(leads)} руб)\n\n"
         f"Создай ссылку → лей людей → они проходят капчу, ИИ их греет.\n"
-        f"Скинь proof → подтвердим → +1 лид (250 руб).{extra}",
+        f"ИИ сам выяснит действие и начислит тебе лида, ничего кидать не нужно.",
         reply_markup=k, parse_mode="HTML",
     )
 
@@ -260,15 +439,15 @@ async def handle_partner_link(m: Message, code: str):
     with db() as conn:
         conn.execute("UPDATE links SET clicks=clicks+1 WHERE id=?", (link["id"],))
 
-    # есть ли подключённый ИИ-аккаунт
-    if not workers.account or not workers.account.username:
-        await m.answer("⏳ ИИ-аккаунт пока не подключён. Зайди позже.")
+    # есть ли подключённый ИИ-аккаунт (по сессии, на которую ведёт ссылка)
+    ai_username = link["ai"]
+    if not ai_username or (link["session_id"] not in workers.workers):
+        await m.answer("⏳ ИИ-аккаунт для этой ссылки пока не подключён. Зайди позже.")
         return
 
     # создаём/обновляем лида, привязываем к партнёру
     with db() as conn:
         lead = conn.execute("SELECT * FROM leads WHERE telegram_id=?", (str(uid),)).fetchone()
-        ai_username = workers.account.username
         if not lead:
             conn.execute(
                 "INSERT INTO leads (partner_id, link_id, telegram_id, username, ai_username, "
@@ -355,7 +534,7 @@ async def captcha_check(cq: CallbackQuery):
             conn.execute("UPDATE leads SET captcha_passed=1, status='handed', updated_at=? "
                          "WHERE telegram_id=?",
                          (int(datetime.datetime.now().timestamp()), str(uid)))
-        ai = workers.account.username if workers.account else None
+        ai = lead["ai_username"]
         await cq.message.answer("✅ Проверка пройдена!")
         if ai:
             await cq.message.answer(
@@ -376,83 +555,6 @@ async def give_ai_contact(m: Message, ai_username: str):
         f"Напиши ему — расскажет как зарабатывать на pocket-option.",
         parse_mode="HTML",
     )
-
-
-# ============================================================
-# PROOF + ЖЁСТКАЯ ПРОВЕРКА ЛИДА
-# ============================================================
-@dp.callback_query(F.data == "u_proof")
-async def u_proof(cq: CallbackQuery, state: FSMContext):
-    await state.set_state(UserStates.waiting_proof)
-    await cq.message.answer(
-        "📥 Пришли proof по лиду (одним сообщением):\n"
-        "1. pocket id\n"
-        "2. сколько заработал\n"
-        "3. коротко, что делал\n\n"
-        "ИИ жёстко проверит переписку + proof. Подтвердится (2+ раза) → +1 лид."
-    )
-    await cq.answer()
-
-
-@dp.message(UserStates.waiting_proof)
-async def handle_proof(m: Message, state: FSMContext):
-    uid = m.from_user.id
-    with db() as conn:
-        conv = conn.execute(
-            "SELECT messages FROM conversations WHERE telegram_id=? ORDER BY updated_at DESC LIMIT 1",
-            (str(uid),),
-        ).fetchone()
-        lead = conn.execute("SELECT * FROM leads WHERE telegram_id=?", (str(uid),)).fetchone()
-
-    if not conv:
-        await state.clear()
-        await m.answer("❌ Нет переписки с этим лидом у ИИ.")
-        return
-
-    msgs = json.loads(conv["messages"])
-    txt = "\n".join(f"{x['role']}: {x['content'][:220]}" for x in msgs[-10:])
-    confirmations_so_far = lead["confirmations"] if lead else 0
-
-    async with aiohttp.ClientSession(loop=asyncio.get_running_loop()) as session:
-        res = await ai_module.evaluate_chat(session, txt, m.text, confirmations_so_far)
-
-    with db() as conn:
-        if lead:
-            conn.execute(
-                "UPDATE leads SET score=?, confirmations=?, proof=?, income=?, pocket_id=?, "
-                "updated_at=?, status=? WHERE id=?",
-                (res["score"], res["confirmations"], m.text, m.text, m.text,
-                 int(datetime.datetime.now().timestamp()), "qualified" if res["confirmed"] else "pending",
-                 lead["id"]),
-            )
-            partner_id = lead["partner_id"]
-        else:
-            partner_id = None
-
-    if res["confirmed"]:
-        if partner_id:
-            with db() as conn:
-                conn.execute("UPDATE users SET leads=leads+1 WHERE id=?", (partner_id,))
-                conn.execute("UPDATE leads SET status='qualified' WHERE telegram_id=?", (str(uid),))
-        await m.answer(
-            f"✅ <b>ИИ ПОДТВЕРДИЛ: лид!</b>\n"
-            f"Скор: {res['score']:.2f} (порог {config.SCORE_CONFIRM_THRESHOLD}), "
-            f"подтверждений: {res['confirmations']}/{config.MIN_CONFIRMATIONS}\n"
-            f"Причины: {', '.join(res['reasons'])[:300]}\n\n"
-            f"+1 лид (250 руб) начислен партнёру.",
-            parse_mode="HTML",
-        )
-    else:
-        await m.answer(
-            f"🤔 <b>Пока НЕ лид.</b>\n"
-            f"Скор: {res['score']:.2f} (порог {config.SCORE_CONFIRM_THRESHOLD}), "
-            f"подтверждений: {res['confirmations']}/{config.MIN_CONFIRMATIONS}\n"
-            f"Нужна проба (proof): {'да' if res['needs_proof'] else 'нет'}\n"
-            f"Причины: {', '.join(res['reasons'])[:300]}\n\n"
-            f"Пусть лид больше общается/работает, потом пришли новый proof.",
-            parse_mode="HTML",
-        )
-    await state.clear()
 
 
 # ============================================================
@@ -516,6 +618,8 @@ async def u_stats(cq: CallbackQuery):
 # ============================================================
 @dp.callback_query(F.data == "a_stats")
 async def a_stats(cq: CallbackQuery):
+    if not is_admin(cq.from_user.id):
+        await cq.answer("⛔ нет доступа", show_alert=True); return
     with db() as conn:
         partners = conn.execute("SELECT COUNT(*) c FROM users").fetchone()["c"]
         leads_total = conn.execute("SELECT COUNT(*) c FROM leads").fetchone()["c"]
@@ -540,6 +644,8 @@ async def a_stats(cq: CallbackQuery):
 
 @dp.callback_query(F.data == "a_top")
 async def a_top(cq: CallbackQuery):
+    if not is_admin(cq.from_user.id):
+        await cq.answer("⛔ нет доступа", show_alert=True); return
     with db() as conn:
         rows = conn.execute(
             "SELECT username, leads FROM users WHERE leads>0 ORDER BY leads DESC LIMIT 10"
@@ -553,6 +659,8 @@ async def a_top(cq: CallbackQuery):
 
 @dp.callback_query(F.data == "a_links")
 async def a_links(cq: CallbackQuery):
+    if not is_admin(cq.from_user.id):
+        await cq.answer("⛔ нет доступа", show_alert=True); return
     with db() as conn:
         rows = conn.execute(
             "SELECT l.*, u.username as pu, s.username as ai FROM links l "
@@ -567,6 +675,8 @@ async def a_links(cq: CallbackQuery):
 
 @dp.callback_query(F.data == "a_channels")
 async def a_channels(cq: CallbackQuery):
+    if not is_admin(cq.from_user.id):
+        await cq.answer("⛔ нет доступа", show_alert=True); return
     await cq.message.edit_text(
         f"🧪 <b>Капча-каналы</b> (нужно {config.CAPTCHA_CHANNELS_REQUIRED} в пуле)\n\n"
         f"{_channels_list()}\n\n"
@@ -579,6 +689,8 @@ async def a_channels(cq: CallbackQuery):
 
 @dp.callback_query(F.data == "a_chats")
 async def a_chats(cq: CallbackQuery):
+    if not is_admin(cq.from_user.id):
+        await cq.answer("⛔ нет доступа", show_alert=True); return
     with db() as conn:
         rows = conn.execute(
             "SELECT DISTINCT telegram_id FROM conversations ORDER BY updated_at DESC LIMIT 20"
@@ -593,6 +705,8 @@ async def a_chats(cq: CallbackQuery):
 
 @dp.callback_query(F.data.startswith("ev::"))
 async def eval_one(cq: CallbackQuery):
+    if not is_admin(cq.from_user.id):
+        await cq.answer("⛔ нет доступа", show_alert=True); return
     tg = cq.data.split("::")[1]
     with db() as conn:
         conv = conn.execute(
@@ -601,14 +715,13 @@ async def eval_one(cq: CallbackQuery):
         ).fetchone()
         lead = conn.execute("SELECT * FROM leads WHERE telegram_id=?", (tg,)).fetchone()
     txt = "\n".join(f"{x['role']}: {x['content'][:150]}" for x in json.loads(conv["messages"])[-8:])
-    p = lead["proof"] if lead else None
-    async with aiohttp.ClientSession(loop=asyncio.get_running_loop()) as session:
-        res = await ai_module.evaluate_chat(session, txt, p, lead["confirmations"] if lead else 0)
+    res = await ai_module.evaluate_action(AIO, txt, lead["confirmations"] if lead else 0)
     await cq.message.answer(
         f"🔎 <b>{tg}</b>\n\n{txt}\n\n"
-        f"Скор: {res['score']}/1 · подтверждений: {res['confirmations']}\n"
-        f"Лид: {'ДА' if res['is_lead'] else 'нет'}, needs_proof: {res['needs_proof']}\n"
-        f"Причины: {', '.join(res['reasons'])[:200]}",
+        f"Действие на PO: {'ДА' if res['cash_action'] else 'нет'} · подтверждений: {res['confirmations']}\n"
+        f"Pocket id: {res['pocket_id'] or '—'} · доход: {res['income'] or '—'}\n"
+        f"Лид: {'ЗАСЧИТАН' if res['confirmed'] else 'нет'}\n"
+        f"Причина: {res['reason'][:200]}",
         parse_mode="HTML",
     )
     await cq.answer()
@@ -616,6 +729,8 @@ async def eval_one(cq: CallbackQuery):
 
 @dp.callback_query(F.data == "a_wd")
 async def a_wd(cq: CallbackQuery):
+    if not is_admin(cq.from_user.id):
+        await cq.answer("⛔ нет доступа", show_alert=True); return
     with db() as conn:
         rows = conn.execute("SELECT * FROM withdrawals WHERE status='pending'").fetchall()
     text = "💰 <b>Заявки на вывод</b>\n\n" if rows else "💰 Заявок нет."
@@ -627,6 +742,8 @@ async def a_wd(cq: CallbackQuery):
 
 @dp.callback_query(F.data == "a_restart")
 async def a_restart(cq: CallbackQuery):
+    if not is_admin(cq.from_user.id):
+        await cq.answer("⛔ нет доступа", show_alert=True); return
     await workers.restart()
     await cq.message.answer("🔄 Воркеры перезапущены.")
     await cq.answer()
@@ -640,6 +757,7 @@ async def on_startup():
     init_db()
     global AIO
     AIO = aiohttp.ClientSession(loop=asyncio.get_running_loop())
+    workers.aio = AIO
     bot.username = (await bot.me()).username
     await workers.start_all()
 
@@ -647,8 +765,7 @@ async def on_startup():
 async def on_shutdown():
     if AIO:
         await AIO.close()
-    if workers.account:
-        await workers.account.stop()
+    await workers.stop_all()
 
 
 if __name__ == "__main__":
