@@ -55,13 +55,13 @@ def rub(leads):
 # ============================================================
 async def admin_menu(m, extra=""):
     k = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton("📊 Статистика", callback_data="a_stats")],
-        [InlineKeyboardButton("🏆 Топ лидов по партнёрам", callback_data="a_top")],
-        [InlineKeyboardButton("🔗 Все партнёрские ссылки", callback_data="a_links")],
-        [InlineKeyboardButton("🧪 Капча-каналы", callback_data="a_channels")],
-        [InlineKeyboardButton("🔎 Оценка чатов ИИ", callback_data="a_chats")],
-        [InlineKeyboardButton("💰 Заявки на вывод", callback_data="a_wd")],
-        [InlineKeyboardButton("🔄 Перезапуск воркеров", callback_data="a_restart")],
+        [InlineKeyboardButton(text="📊 Статистика", callback_data="a_stats")],
+        [InlineKeyboardButton(text="🏆 Топ лидов по партнёрам", callback_data="a_top")],
+        [InlineKeyboardButton(text="🔗 Все партнёрские ссылки", callback_data="a_links")],
+        [InlineKeyboardButton(text="🧪 Капча-каналы", callback_data="a_channels")],
+        [InlineKeyboardButton(text="🔎 Оценка чатов ИИ", callback_data="a_chats")],
+        [InlineKeyboardButton(text="💰 Заявки на вывод", callback_data="a_wd")],
+        [InlineKeyboardButton(text="🔄 Перезапуск воркеров", callback_data="a_restart")],
     ])
     await m.answer(
         "🛠 <b>Админ-панель</b>\n\n"
@@ -181,10 +181,10 @@ async def user_menu(m, extra=""):
         row = conn.execute("SELECT leads FROM users WHERE id=?", (uid,)).fetchone()
     leads = row["leads"] if row else 0
     k = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton("🔗 Мои партнёрские ссылки", callback_data="u_links")],
-        [InlineKeyboardButton("✅ Отправить proof лида", callback_data="u_proof")],
-        [InlineKeyboardButton("💰 Заказать вывод", callback_data="u_wd")],
-        [InlineKeyboardButton("📈 Статистика", callback_data="u_stats")],
+        [InlineKeyboardButton(text="🔗 Мои партнёрские ссылки", callback_data="u_links")],
+        [InlineKeyboardButton(text="✅ Отправить proof лида", callback_data="u_proof")],
+        [InlineKeyboardButton(text="💰 Заказать вывод", callback_data="u_wd")],
+        [InlineKeyboardButton(text="📈 Статистика", callback_data="u_stats")],
     ])
     await m.answer(
         f"👋 Привет, партнёр!\n\n💎 Лидов: <b>{leads}</b> (≈{rub(leads)} руб)\n\n"
@@ -214,7 +214,7 @@ async def u_links(cq: CallbackQuery):
     kb_rows = []
     for s in sessions:
         kb_rows.append([InlineKeyboardButton(
-            f"Создать на аккаунт @{s['username'] or s['name']}",
+            text=f"Создать на аккаунт @{s['username'] or s['name']}",
             callback_data=f"mk_link::{s['id']}",
         )])
     kb = InlineKeyboardMarkup(inline_keyboard=kb_rows)
@@ -302,9 +302,9 @@ async def handle_partner_link(m: Message, code: str):
         uname = ch["username"]
         t = uname if uname.startswith("@") else f"@{uname}"
         kb_rows.append([InlineKeyboardButton(
-            f"📢 Подписаться: {ch['title'] or t}", url=f"https://t.me/{uname.lstrip('@')}"
+            text=f"📢 Подписаться: {ch['title'] or t}", url=f"https://t.me/{uname.lstrip('@')}"
         )])
-    kb_rows.append([InlineKeyboardButton("✅ Я подписался — проверить", callback_data="captcha_check")])
+    kb_rows.append([InlineKeyboardButton(text="✅ Я подписался — проверить", callback_data="captcha_check")])
     # запомним выбранные каналы для этого лида
     with db() as conn:
         conn.execute("UPDATE leads SET comment=?, captcha_passed=0, status='fresh' WHERE telegram_id=?",
@@ -586,7 +586,7 @@ async def a_chats(cq: CallbackQuery):
     text = "🔎 <b>Чаты для оценки ИИ</b>\n\n" if rows else "Чатов нет."
     kb = []
     for r in rows:
-        kb.append([InlineKeyboardButton(r["telegram_id"], callback_data=f"ev::{r['telegram_id']}")])
+        kb.append([InlineKeyboardButton(text=r["telegram_id"], callback_data=f"ev::{r['telegram_id']}")])
     await cq.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
     await cq.answer()
 
